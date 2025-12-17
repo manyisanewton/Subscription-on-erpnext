@@ -1,4 +1,4 @@
-from frappe.utils import add_months, add_years, getdate, nowdate
+from frappe.utils import add_months, getdate, nowdate
 
 # --- HELPER: Get Frequency in Months ---
 def get_months_to_add(plan_name):
@@ -14,48 +14,39 @@ def get_months_to_add(plan_name):
 
 # --- MAIN LOGIC ---
 
-# 1. Get the frequency from the first plan in the list
+# 1. Determine Cycle Length
 if doc.subscription_plan:
+    # Assuming the plan is in the first row
     plan_name = doc.subscription_plan[0].plan
     months_to_add = get_months_to_add(plan_name)
 else:
     months_to_add = 1
 
-# 2. Check the latest Payment Status
-is_paid = False
-if doc.payment_method:
-    # Check the last row (assuming chronological order) or iterate to find 'Paid'
-    for row in doc.payment_method:
-        if row.status == "Paid":
-            is_paid = True
+# 2. AUTO-CALCULATE END DATE 
+# We strictly enforce: End Date = Start Date + Frequency
+# This ensures the dates are always correct based on the plan.
+if doc.subscription_start_date:
+    doc.subscription_end_date = add_months(getdate(doc.subscription_start_date), months_to_add)
 
-# 3. Cycle Counting Logic
-# Calculate the theoretical end date based on Start Date + Frequency
-current_cycle_end = add_months(getdate(doc.subscription_start_date), months_to_add)
+# 3. Check the LATEST Payment Status
+# We check the LAST row in the table. If the newest invoice is paid, we are good.
+is_latest_paid = False
+if doc.payment_method and len(doc.payment_method) > 0:
+    last_row = doc.payment_method[-1]
+    if last_row.status == "Paid":
+        is_latest_paid = True
 
-if is_paid:
+# 4. Update Status based on Payment & Dates
+if is_latest_paid:
     doc.status = "Active"
-    
-    # LOGIC: If the current period is fully paid and passed, auto-advance the dates?
-    # Or simply ensure the End Date reflects the paid period.
-    # Here we set the End Date to the Calculated Cycle End
-    doc.subscription_end_date = current_cycle_end
-    
-    # If the payment was for a RENEWAL (i.e., we are already past the old end date),
-    # You might want to shift the Start Date. 
-    # UNCOMMENT BELOW LINES IF YOU WANT START DATE TO SHIFT FORWARD ON RENEWAL
-    # if getdate(nowdate()) > getdate(doc.subscription_start_date):
-    #     doc.subscription_start_date = nowdate()
-    #     doc.subscription_end_date = add_months(nowdate(), months_to_add)
-
 else:
-    # If not paid, check if we are past the due date
-    if getdate(nowdate()) > getdate(current_cycle_end):
+    # If not paid, check if we are past the calculated end date
+    if doc.subscription_end_date and getdate(nowdate()) > getdate(doc.subscription_end_date):
         doc.status = "Past Due Date"
     else:
-        # If not paid, but time remains, it is technically "Active" or "Pending"
+        # If not paid, but time remains, it is "Active" (Pending Payment)
         doc.status = "Active"
 
-# 4. Final Validation
+# 5. Final Validation (Safety Check)
 if doc.subscription_end_date and getdate(doc.subscription_end_date) < getdate(doc.subscription_start_date):
-    frappe.throw("Subscription End Date cannot be before Start Date")
+    frappe.throw("Error: Subscription End Date cannot be before Start Date")
